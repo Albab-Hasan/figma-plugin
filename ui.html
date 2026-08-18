@@ -1,0 +1,620 @@
+<!-- Moodboard Grabber — plugin UI. All networking happens here; the main thread only makes nodes. -->
+<style>
+  :root {
+    --bg: var(--figma-color-bg, #2c2c2c);
+    --bg-2: var(--figma-color-bg-secondary, #383838);
+    --bg-hover: var(--figma-color-bg-hover, #444);
+    --text: var(--figma-color-text, #fff);
+    --text-2: var(--figma-color-text-secondary, #b3b3b3);
+    --border: var(--figma-color-border, #444);
+    --brand: var(--figma-color-bg-brand, #0d99ff);
+    --brand-text: var(--figma-color-text-onbrand, #fff);
+    --danger: var(--figma-color-text-danger, #f24822);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font: 11px/1.4 Inter, -apple-system, system-ui, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* --- drop / paste zone --- */
+  #catcher {
+    margin: 12px 12px 8px;
+    padding: 18px 12px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    text-align: center;
+    cursor: pointer;
+    flex: none;
+    transition: border-color .12s, background .12s;
+  }
+  #catcher:hover, #catcher.hot { border-color: var(--brand); background: var(--bg-2); }
+  #catcher strong { display: block; font-size: 12px; margin-bottom: 4px; }
+  #catcher span { color: var(--text-2); }
+  #catcher.slim { padding: 10px; }
+
+  /* --- results grid --- */
+  #results { flex: 1; overflow-y: auto; padding: 0 12px; display: none; }
+  #results.on { display: block; }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 8px;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 2;
+  }
+  .bar .count { flex: 1; color: var(--text-2); }
+  .link {
+    color: var(--brand);
+    cursor: pointer;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+  }
+  .link:hover { text-decoration: underline; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    padding-bottom: 12px;
+  }
+
+  .cell {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-2);
+    cursor: pointer;
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+  }
+  .cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cell.sel { outline-color: var(--brand); }
+  .cell:not(.sel) img { opacity: .35; }
+  .cell .tick {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    background: rgba(0,0,0,.55);
+    border: 1px solid rgba(255,255,255,.5);
+  }
+  .cell.sel .tick {
+    background: var(--brand);
+    border-color: var(--brand);
+  }
+  .cell.sel .tick::after {
+    content: '';
+    position: absolute;
+    left: 4px; top: 1px;
+    width: 4px; height: 8px;
+    border: solid var(--brand-text);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .cell .dim {
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    padding: 1px 4px;
+    font-size: 9px;
+    border-radius: 3px;
+    background: rgba(0,0,0,.6);
+    color: #fff;
+  }
+  .cell.dead { display: none; }
+
+  /* --- footer --- */
+  footer {
+    flex: none;
+    border-top: 1px solid var(--border);
+    padding: 10px 12px;
+    background: var(--bg);
+  }
+  .opts { display: flex; gap: 8px; margin-bottom: 10px; }
+  .opt { flex: 1; }
+  .opt label { display: block; color: var(--text-2); margin-bottom: 3px; }
+  .opt input[type=number] {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--text);
+    padding: 5px 6px;
+    font: inherit;
+  }
+  .opt input:focus { border-color: var(--brand); outline: none; }
+  .check { display: flex; align-items: center; gap: 6px; color: var(--text-2); margin-bottom: 10px; }
+  .check input { margin: 0; }
+
+  #go {
+    width: 100%;
+    padding: 9px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--brand);
+    color: var(--brand-text);
+    font: 600 11px/1 Inter, sans-serif;
+    cursor: pointer;
+  }
+  #go:disabled { opacity: .4; cursor: default; }
+
+  #status { margin-top: 8px; color: var(--text-2); min-height: 14px; }
+  #status.err { color: var(--danger); }
+
+  #paste-sink {
+    position: fixed;
+    opacity: 0;
+    pointer-events: none;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+  }
+</style>
+
+<div id="catcher">
+  <strong>Paste your moodboard here</strong>
+  <span>
+    On Pinterest (or any site): scroll so the images you want are visible, press
+    <b>Ctrl/Cmd&nbsp;+&nbsp;A</b> then <b>Ctrl/Cmd&nbsp;+&nbsp;C</b>, come back and press
+    <b>Ctrl/Cmd&nbsp;+&nbsp;V</b>.<br />
+    Dragged images and pasted URL lists work too — or
+    <button class="link" id="browse">choose files</button>.
+  </span>
+</div>
+
+<div id="results">
+  <div class="bar">
+    <span class="count" id="count"></span>
+    <button class="link" id="all">All</button>
+    <button class="link" id="none">None</button>
+    <button class="link" id="clear">Clear</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<footer>
+  <div class="opts">
+    <div class="opt">
+      <label for="cols">Columns</label>
+      <input type="number" id="cols" value="4" min="1" max="20" />
+    </div>
+    <div class="opt">
+      <label for="width">Column width</label>
+      <input type="number" id="width" value="320" min="16" max="4096" />
+    </div>
+    <div class="opt">
+      <label for="gap">Gap</label>
+      <input type="number" id="gap" value="24" min="0" max="500" />
+    </div>
+  </div>
+  <label class="check"><input type="checkbox" id="frame" checked /> Wrap in a frame</label>
+  <button id="go" disabled>Import</button>
+  <div id="status"></div>
+</footer>
+
+<textarea id="paste-sink"></textarea>
+
+<script>
+  const PROXY = 'https://images.weserv.nl/?url=';
+  const MIN_PX = 120; // anything smaller is an avatar/icon, not moodboard material
+  const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|bmp)(\?|#|$)/i;
+
+  const el = (id) => document.getElementById(id);
+  const catcher = el('catcher');
+  const grid = el('grid');
+  const results = el('results');
+  const status = el('status');
+  const go = el('go');
+
+  /** @type {Map<string, {url: string, alts: string[], sel: boolean, w: number, h: number, cell: HTMLElement}>} */
+  const items = new Map();
+
+  /* ---------------- capture ---------------- */
+
+  document.addEventListener('paste', (e) => {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    e.preventDefault();
+    handleTransfer(dt);
+  });
+
+  ['dragenter', 'dragover'].forEach((t) =>
+    document.addEventListener(t, (e) => {
+      e.preventDefault();
+      catcher.classList.add('hot');
+    })
+  );
+  ['dragleave', 'drop'].forEach((t) =>
+    document.addEventListener(t, () => catcher.classList.remove('hot'))
+  );
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) handleTransfer(e.dataTransfer);
+  });
+
+  el('browse').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = 'image/*';
+    picker.multiple = true;
+    picker.onchange = () => addFiles(Array.from(picker.files || []));
+    picker.click();
+  });
+
+  // Ctrl/Cmd+V only reaches us while something focusable has focus, and clicking
+  // thumbnails steals it — so park focus back on the hidden sink after every click.
+  const sink = el('paste-sink');
+  const keepFocus = () => sink.focus();
+  keepFocus();
+  window.addEventListener('focus', keepFocus);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('input, textarea')) keepFocus();
+  });
+
+  async function handleTransfer(dt) {
+    const files = Array.from(dt.files || []).filter((f) => f.type.startsWith('image/'));
+    if (files.length) {
+      addFiles(files);
+      return;
+    }
+
+    const found = [];
+    const html = dt.getData('text/html');
+    if (html) found.push(...fromHtml(html));
+
+    const uri = dt.getData('text/uri-list');
+    if (uri) found.push(...uri.split(/\s+/).filter(Boolean));
+
+    const text = dt.getData('text/plain');
+    if (text) found.push(...fromText(text));
+
+    if (!found.length) {
+      say('Nothing image-like in that paste. Try selecting the page (Ctrl/Cmd+A) before copying.', true);
+      return;
+    }
+    add(found);
+  }
+
+  function addFiles(files) {
+    files.forEach((f) => {
+      const url = URL.createObjectURL(f);
+      register(url, [], f.name);
+    });
+    render();
+  }
+
+  /* ---------------- extraction ---------------- */
+
+  function fromHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const out = [];
+
+    doc.querySelectorAll('img').forEach((img) => {
+      const best = bestFromSrcset(img.getAttribute('srcset'));
+      out.push(best || img.getAttribute('src'));
+    });
+
+    doc.querySelectorAll('source[srcset]').forEach((s) => {
+      out.push(bestFromSrcset(s.getAttribute('srcset')));
+    });
+
+    doc.querySelectorAll('[style*="background-image"]').forEach((n) => {
+      const m = /url\(['"]?(.+?)['"]?\)/i.exec(n.getAttribute('style') || '');
+      if (m) out.push(m[1]);
+    });
+
+    doc.querySelectorAll('a[href]').forEach((a) => {
+      const href = a.getAttribute('href');
+      if (href && IMG_EXT.test(href)) out.push(href);
+    });
+
+    return out.filter(Boolean);
+  }
+
+  // srcset entries look like "url 2x" or "url 800w" — take the biggest descriptor.
+  function bestFromSrcset(srcset) {
+    if (!srcset) return null;
+    let best = null;
+    let bestScore = -1;
+    srcset.split(',').forEach((part) => {
+      const bits = part.trim().split(/\s+/);
+      if (!bits[0]) return;
+      const d = bits[1] || '1x';
+      const score = d.endsWith('w') ? parseFloat(d) : parseFloat(d) * 1000;
+      if (score > bestScore) {
+        bestScore = score;
+        best = bits[0];
+      }
+    });
+    return best;
+  }
+
+  function fromText(text) {
+    const urls = text.match(/(https?:\/\/|data:image\/)[^\s"'<>)\]]+/gi) || [];
+    return urls.filter((u) => u.startsWith('data:') || IMG_EXT.test(u) || /pinimg|cdn|images?\./i.test(u));
+  }
+
+  /* ---------------- normalising ---------------- */
+
+  function absolute(u) {
+    if (!u) return null;
+    u = u.trim().replace(/&amp;/g, '&');
+    if (u.startsWith('data:')) return u;
+    if (u.startsWith('blob:')) return u;
+    if (u.startsWith('//')) return 'https:' + u;
+    if (!/^https?:\/\//i.test(u)) return null;
+    return u;
+  }
+
+  // Pinterest serves thumbnails at /236x/, /474x/ etc. The same hash exists at
+  // full resolution under /originals/, so try that first and keep the rest as fallbacks.
+  function candidates(url) {
+    const m = /^(https?:\/\/i\.pinimg\.com\/)([^/]+)\/(.+)$/i.exec(url);
+    if (!m) return { url, alts: [] };
+    const [, base, size, tail] = m;
+    if (size === 'originals') return { url, alts: [base + '736x/' + tail] };
+    const chain = ['originals', '1200x', '736x'].map((s) => base + s + '/' + tail);
+    return { url: chain[0], alts: chain.slice(1).concat(url) };
+  }
+
+  // Dedupe key: for Pinterest the hash path is stable across sizes.
+  function keyOf(url) {
+    const m = /i\.pinimg\.com\/[^/]+\/(.+?)(\.\w+)?$/i.exec(url);
+    if (m) return 'pin:' + m[1];
+    return url.split('?')[0];
+  }
+
+  /* ---------------- model + render ---------------- */
+
+  function add(rawList) {
+    let added = 0;
+    rawList.forEach((raw) => {
+      const abs = absolute(raw);
+      if (!abs) return;
+      const { url, alts } = candidates(abs);
+      if (register(url, alts)) added++;
+    });
+    render();
+    if (!added) say('Those were all already in the list.');
+  }
+
+  function register(url, alts, name) {
+    const key = keyOf(url);
+    if (items.has(key)) return false;
+    items.set(key, { url, alts: alts || [], sel: true, w: 0, h: 0, cell: null, name: name });
+    return true;
+  }
+
+  function render() {
+    if (!items.size) {
+      results.classList.remove('on');
+      catcher.classList.remove('slim');
+      go.disabled = true;
+      refreshCount();
+      return;
+    }
+    results.classList.add('on');
+    catcher.classList.add('slim');
+
+    items.forEach((item, key) => {
+      if (item.cell) return;
+
+      const cell = document.createElement('div');
+      cell.className = 'cell sel';
+
+      const img = document.createElement('img');
+      img.referrerPolicy = 'no-referrer';
+      img.loading = 'lazy';
+      img.src = item.url;
+
+      img.onload = () => {
+        item.w = img.naturalWidth;
+        item.h = img.naturalHeight;
+        if (item.w < MIN_PX && item.h < MIN_PX) {
+          cell.classList.add('dead');
+          item.sel = false;
+        } else {
+          const tag = document.createElement('div');
+          tag.className = 'dim';
+          tag.textContent = item.w + '×' + item.h;
+          cell.appendChild(tag);
+        }
+        refreshCount();
+      };
+
+      // First choice 404s on some pins — walk the fallback chain.
+      img.onerror = () => {
+        const next = item.alts.shift();
+        if (next) {
+          item.url = next;
+          img.src = next;
+          return;
+        }
+        cell.classList.add('dead');
+        item.sel = false;
+        refreshCount();
+      };
+
+      const tick = document.createElement('div');
+      tick.className = 'tick';
+
+      cell.appendChild(img);
+      cell.appendChild(tick);
+      cell.onclick = () => {
+        item.sel = !item.sel;
+        cell.classList.toggle('sel', item.sel);
+        refreshCount();
+      };
+
+      item.cell = cell;
+      grid.appendChild(cell);
+    });
+
+    refreshCount();
+  }
+
+  function selected() {
+    return Array.from(items.values()).filter((i) => i.sel && i.cell && !i.cell.classList.contains('dead'));
+  }
+
+  function refreshCount() {
+    const n = selected().length;
+    const total = Array.from(items.values()).filter((i) => !i.cell || !i.cell.classList.contains('dead')).length;
+    el('count').textContent = total ? `${n} of ${total} selected` : '';
+    go.disabled = n === 0;
+    go.textContent = n ? `Import ${n} image${n === 1 ? '' : 's'}` : 'Import';
+  }
+
+  el('all').onclick = () => {
+    items.forEach((i) => {
+      if (i.cell && !i.cell.classList.contains('dead')) {
+        i.sel = true;
+        i.cell.classList.add('sel');
+      }
+    });
+    refreshCount();
+  };
+  el('none').onclick = () => {
+    items.forEach((i) => {
+      i.sel = false;
+      if (i.cell) i.cell.classList.remove('sel');
+    });
+    refreshCount();
+  };
+  el('clear').onclick = () => {
+    items.clear();
+    grid.innerHTML = '';
+    say('');
+    render();
+  };
+
+  /* ---------------- fetching ---------------- */
+
+  function proxied(url) {
+    return PROXY + encodeURIComponent(url) + '&w=4096&h=4096&fit=inside&we';
+  }
+
+  async function grab(url, oversized) {
+    if (url.startsWith('data:') || url.startsWith('blob:')) {
+      const r = await fetch(url);
+      return normalise(await r.blob());
+    }
+
+    // Direct first: keeps the request between you and the host when CORS allows it.
+    // Skipped for images past Figma's 4096px ceiling — those need the proxy to downscale.
+    if (!oversized) {
+      try {
+        const r = await fetch(url, { mode: 'cors', referrerPolicy: 'no-referrer' });
+        if (r.ok) return normalise(await r.blob());
+      } catch (e) {
+        /* falls through to the proxy */
+      }
+    }
+
+    const r = await fetch(proxied(url));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return normalise(await r.blob());
+  }
+
+  // Figma accepts PNG, JPG and GIF only — re-encode anything else via the proxy's
+  // converter, or locally for blobs the proxy cannot reach.
+  async function normalise(blob) {
+    if (/^image\/(png|jpeg|gif)$/.test(blob.type)) {
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+    return new Uint8Array(await (await toPng(blob)).arrayBuffer());
+  }
+
+  function toPng(blob) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = Math.min(img.naturalWidth, 4096);
+        c.height = Math.min(img.naturalHeight, 4096);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        c.toBlob((out) => (out ? resolve(out) : reject(new Error('re-encode failed'))), 'image/png');
+      };
+      img.onerror = () => reject(new Error('unreadable image'));
+      img.src = URL.createObjectURL(blob);
+    });
+  }
+
+  /* ---------------- import ---------------- */
+
+  go.onclick = async () => {
+    const list = selected();
+    if (!list.length) return;
+
+    go.disabled = true;
+    const opts = {
+      columns: clamp(+el('cols').value, 1, 20),
+      columnWidth: clamp(+el('width').value, 16, 4096),
+      gap: clamp(+el('gap').value, 0, 500),
+      wrapInFrame: el('frame').checked,
+      frameName: 'Moodboard',
+    };
+
+    parent.postMessage({ pluginMessage: { type: 'begin', options: opts } }, '*');
+
+    let ok = 0;
+    let failed = 0;
+    for (let i = 0; i < list.length; i++) {
+      say(`Downloading ${i + 1} of ${list.length}…`);
+      try {
+        const big = list[i].w > 4096 || list[i].h > 4096;
+        const bytes = await grab(list[i].url, big);
+        parent.postMessage(
+          { pluginMessage: { type: 'image', bytes, name: list[i].name || nameFrom(list[i].url) } },
+          '*'
+        );
+        ok++;
+      } catch (e) {
+        failed++;
+      }
+    }
+
+    parent.postMessage({ pluginMessage: { type: 'done' } }, '*');
+    say(failed ? `Placed ${ok}, ${failed} could not be downloaded.` : `Placed ${ok}.`, failed > 0);
+  };
+
+  function nameFrom(url) {
+    try {
+      const p = new URL(url).pathname.split('/').filter(Boolean).pop();
+      return decodeURIComponent(p || 'Image').slice(0, 60);
+    } catch (e) {
+      return 'Image';
+    }
+  }
+
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, isFinite(n) ? n : lo));
+
+  function say(msg, isError) {
+    status.textContent = msg || '';
+    status.classList.toggle('err', !!isError);
+  }
+
+  onmessage = (e) => {
+    const m = e.data.pluginMessage;
+    if (m && m.type === 'finished') refreshCount();
+  };
+</script>

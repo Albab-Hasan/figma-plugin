@@ -1,0 +1,13 @@
+{
+  "name": "Moodboard Grabber",
+  "id": "moodboard-grabber-local",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["*"],
+    "reasoning": "Downloads the image files you paste in from whatever site they live on (Pinterest, Behance, Are.na, etc.), falling back to the images.weserv.nl image proxy when a host does not send CORS headers."
+  }
+}
