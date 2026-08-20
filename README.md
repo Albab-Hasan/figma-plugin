@@ -14,14 +14,32 @@ No npm, no bundler, no account. Three files: `manifest.json`, `code.js`, `ui.htm
 
 ## Use
 
+### Copy-paste (works on most sites)
+
 1. Open your board in the browser. Scroll so the pins you want are on screen
    (Pinterest only keeps visible pins in the DOM — off-screen ones do not exist yet).
 2. `Ctrl/Cmd + A`, then `Ctrl/Cmd + C`.
-3. Switch to Figma, open the plugin, press `Ctrl/Cmd + V`.
+3. Switch to Figma, open the plugin, **click the paste box once** (Figma doesn't hand
+   keyboard focus to a plugin automatically when you switch back from the browser —
+   without a click, `Ctrl/Cmd + V` goes to the canvas instead of the plugin and nothing
+   happens), then press `Ctrl/Cmd + V`.
 4. Thumbnails appear. Click any to deselect. Set columns / width / gap. Hit **Import**.
 
 Also accepts: dragged images, a pasted list of image URLs, and local files via
 **choose files**.
+
+### Bookmarklet (use this if copy-paste comes back empty — e.g. Pinterest)
+
+Pinterest (and other sites with draggable card grids) sets `user-select: none` on
+the grid so drag gestures work. That makes the browser's own `Ctrl/Cmd+A` selection
+skip that whole part of the page — the images never reach the clipboard, so no
+amount of parsing on the plugin side can recover them.
+
+The plugin's paste box has a **🖼️ Grab Images** button — drag it to your bookmarks
+bar once. Then, on the moodboard page, click that bookmark: it reads the live page
+DOM directly (bypassing the clipboard and `Ctrl/Cmd+A` entirely) and copies a plain
+list of image URLs to your clipboard. Switch back to the plugin, click the paste
+box, and `Ctrl/Cmd + V` that list in — it's handled the same as any other paste.
 
 ## How it works
 
@@ -40,9 +58,12 @@ Also accepts: dragged images, a pasted list of image URLs, and local files via
 
 ## Known limits
 
-- **Only what you can see.** Pinterest virtualises its grid, so one copy grabs the
-  ~30–60 rendered pins. For a big board, paste, scroll, paste again — the list
-  accumulates and dedupes.
+- **Only what you can see.** Pinterest virtualises its grid, so one copy (or one
+  bookmarklet click) grabs the ~30–60 rendered pins. For a big board, paste/click,
+  scroll, paste/click again — the list accumulates and dedupes.
+- **Copy-paste fails outright on sites using `user-select: none`** on their image
+  grid (Pinterest's pin cards, notably) — the images are never in what gets copied,
+  regardless of how the HTML is parsed. Use the bookmarklet on those sites instead.
 - **No board URL field.** Pasting a Pinterest board *link* cannot work from inside a
   plugin: the board page is JS-rendered (its raw HTML contains zero pin URLs) and
   Pinterest's internal API sends no CORS headers, so the plugin cannot read it.
@@ -54,5 +75,8 @@ Also accepts: dragged images, a pasted list of image URLs, and local files via
 - **Third-party proxy.** Image URLs (not your Figma content) pass through
   `images.weserv.nl` when the source host blocks CORS. Swap `PROXY` in `ui.html`
   for your own Cloudflare Worker if you would rather not rely on it.
-- **CSS background images** on sites that render photos as `div` backgrounds are
-  only caught when the style is inline.
+- **CSS background images** — the copy-paste path only sees `background-image` when
+  it's an inline `style=""` attribute, not when it comes from a CSS class (clipboard
+  HTML doesn't carry stylesheets). The bookmarklet doesn't have this limitation: it
+  reads `getComputedStyle()` on the live page, which resolves class-based
+  backgrounds too.

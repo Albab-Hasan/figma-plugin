@@ -37,9 +37,13 @@
     transition: border-color .12s, background .12s;
   }
   #catcher:hover, #catcher.hot { border-color: var(--brand); background: var(--bg-2); }
+  #catcher:focus { outline: none; border-color: var(--brand); background: var(--bg-2); }
   #catcher strong { display: block; font-size: 12px; margin-bottom: 4px; }
   #catcher span { color: var(--text-2); }
   #catcher.slim { padding: 10px; }
+  #catcher .focused-hint { display: none; color: var(--brand); }
+  #catcher:focus .focused-hint { display: inline; }
+  #catcher:focus .unfocused-hint { display: none; }
 
   /* --- results grid --- */
   #results { flex: 1; overflow-y: auto; padding: 0 12px; display: none; }
@@ -159,25 +163,63 @@
   #status { margin-top: 8px; color: var(--text-2); min-height: 14px; }
   #status.err { color: var(--danger); }
 
-  #paste-sink {
-    position: fixed;
-    opacity: 0;
-    pointer-events: none;
-    left: -9999px;
-    width: 1px;
-    height: 1px;
+  #debug { display: none; margin-top: 8px; }
+  #debug.on { display: block; }
+  #debug textarea {
+    width: 100%;
+    height: 90px;
+    resize: vertical;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font: 10px/1.3 ui-monospace, monospace;
+    padding: 6px;
+  }
+  #debug .row { display: flex; gap: 8px; margin-top: 4px; }
+
+  #bookmarklet-row {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--text-2);
+  }
+  #bookmarklet-row strong { display: block; color: var(--text); font-size: 11px; margin-bottom: 3px; }
+  #bookmarklet {
+    display: inline-block;
+    margin: 4px 0;
+    padding: 5px 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    text-decoration: none;
+    font-weight: 600;
+    cursor: grab;
   }
 </style>
 
-<div id="catcher">
-  <strong>Paste your moodboard here</strong>
+<div id="catcher" tabindex="0">
+  <strong>
+    <span class="unfocused-hint">Click here, then paste your moodboard</span>
+    <span class="focused-hint">Ready — press Ctrl/Cmd + V</span>
+  </strong>
   <span>
     On Pinterest (or any site): scroll so the images you want are visible, press
-    <b>Ctrl/Cmd&nbsp;+&nbsp;A</b> then <b>Ctrl/Cmd&nbsp;+&nbsp;C</b>, come back and press
-    <b>Ctrl/Cmd&nbsp;+&nbsp;V</b>.<br />
+    <b>Ctrl/Cmd&nbsp;+&nbsp;A</b> then <b>Ctrl/Cmd&nbsp;+&nbsp;C</b>, come back,
+    <b>click this box once</b> and press <b>Ctrl/Cmd&nbsp;+&nbsp;V</b>.<br />
     Dragged images and pasted URL lists work too — or
     <button class="link" id="browse">choose files</button>.
   </span>
+
+  <div id="bookmarklet-row">
+    <strong>Site won't paste? (Pinterest, or anything with draggable cards)</strong>
+    Drag this to your browser's bookmarks bar once —
+    <a id="bookmarklet" href="#" draggable="true" title="Drag me to your bookmarks bar">🖼️ Grab Images</a>
+    — then on the moodboard page click that bookmark. It reads the real page (not
+    the clipboard), copies a list of image URLs, and you paste that here instead.
+  </div>
 </div>
 
 <div id="results">
@@ -208,9 +250,14 @@
   <label class="check"><input type="checkbox" id="frame" checked /> Wrap in a frame</label>
   <button id="go" disabled>Import</button>
   <div id="status"></div>
+  <div id="debug">
+    <textarea id="debug-text" readonly></textarea>
+    <div class="row">
+      <button class="link" id="debug-copy">Copy this</button>
+      <button class="link" id="debug-hide">Hide</button>
+    </div>
+  </div>
 </footer>
-
-<textarea id="paste-sink"></textarea>
 
 <script>
   const PROXY = 'https://images.weserv.nl/?url=';
@@ -231,7 +278,10 @@
 
   document.addEventListener('paste', (e) => {
     const dt = e.clipboardData;
-    if (!dt) return;
+    if (!dt) {
+      say('Paste was received but the clipboard was empty or blocked. Try again.', true);
+      return;
+    }
     e.preventDefault();
     handleTransfer(dt);
   });
@@ -260,14 +310,119 @@
     picker.click();
   });
 
-  // Ctrl/Cmd+V only reaches us while something focusable has focus, and clicking
-  // thumbnails steals it — so park focus back on the hidden sink after every click.
-  const sink = el('paste-sink');
-  const keepFocus = () => sink.focus();
+  // Ctrl/Cmd+V only reaches this iframe while something inside it has focus. Figma
+  // does not hand focus to plugin UIs automatically after you switch back from the
+  // browser, so without this the keystroke goes to the canvas instead and nothing
+  // visibly happens. The catcher box is the explicit, visible focus target — it's
+  // focusable (tabindex) and we keep stealing focus back onto it whenever nothing
+  // more specific (a number input) needs it.
+  const keepFocus = () => catcher.focus();
   keepFocus();
   window.addEventListener('focus', keepFocus);
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('input, textarea')) keepFocus();
+    if (!e.target.closest('input, textarea, button, a')) keepFocus();
+  });
+  // Safety net: if focus ever lands on nothing in particular (e.g. this iframe
+  // regains OS-level focus but no element inside it had focus before), reclaim it.
+  setInterval(() => {
+    const active = document.activeElement;
+    if (!active || active === document.body) keepFocus();
+  }, 300);
+
+  /* ---------------- bookmarklet ---------------- */
+
+  // Runs on the moodboard page itself, not in this iframe. Some sites (Pinterest's
+  // pin cards, for one) set `user-select: none` so drag interactions work, which
+  // makes the browser's own Ctrl/Cmd+A selection silently skip that whole subtree —
+  // the images never make it into the clipboard at all, no matter how the HTML is
+  // parsed on this end. Reading the live DOM directly sidesteps that (and also
+  // catches CSS-class background-images via getComputedStyle, which no clipboard
+  // paste can see since only inline styles travel with copied HTML).
+  function bookmarkletSource() {
+    var MIN = 120;
+    var urls = [];
+    var seen = {};
+
+    function add(raw) {
+      if (!raw) return;
+      var u;
+      try {
+        u = new URL(raw, location.href).href;
+      } catch (e) {
+        return;
+      }
+      if (seen[u]) return;
+      seen[u] = true;
+      urls.push(u);
+    }
+
+    function bestFromSrcset(srcset) {
+      if (!srcset) return null;
+      var best = null;
+      var bestScore = -1;
+      srcset.split(',').forEach(function (part) {
+        var bits = part.trim().split(/\s+/);
+        if (!bits[0]) return;
+        var d = bits[1] || '1x';
+        var score = d.slice(-1) === 'w' ? parseFloat(d) : parseFloat(d) * 1000;
+        if (score > bestScore) {
+          bestScore = score;
+          best = bits[0];
+        }
+      });
+      return best;
+    }
+
+    function bigEnough(el) {
+      var r = el.getBoundingClientRect();
+      return r.width >= MIN || r.height >= MIN;
+    }
+
+    document.querySelectorAll('img').forEach(function (img) {
+      if (!bigEnough(img)) return;
+      add(bestFromSrcset(img.getAttribute('srcset')) || img.currentSrc || img.src);
+    });
+
+    document.querySelectorAll('*').forEach(function (el) {
+      var bg = getComputedStyle(el).backgroundImage;
+      if (!bg || bg === 'none') return;
+      var m = /url\(["']?(.*?)["']?\)/.exec(bg);
+      if (!m || !bigEnough(el)) return;
+      add(m[1]);
+    });
+
+    if (!urls.length) {
+      alert('No images found on this page.');
+      return;
+    }
+
+    var text = urls.join('\n');
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    var copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } catch (e) {
+      copied = false;
+    }
+    document.body.removeChild(ta);
+
+    if (copied) {
+      alert('Copied ' + urls.length + ' image URL(s). Switch to Figma, click the plugin’s paste box, and press Ctrl/Cmd+V.');
+    } else {
+      prompt('Copy this list (Ctrl/Cmd+A, Ctrl/Cmd+C), then paste it into the plugin:', text);
+    }
+  }
+
+  const bookmarklet = el('bookmarklet');
+  bookmarklet.href = 'javascript:(' + bookmarkletSource.toString() + ')();';
+  bookmarklet.addEventListener('click', (e) => {
+    e.preventDefault();
+    say('Drag this button to your bookmarks bar — clicking it here does nothing useful.');
   });
 
   async function handleTransfer(dt) {
@@ -279,7 +434,11 @@
 
     const found = [];
     const html = dt.getData('text/html');
-    if (html) found.push(...fromHtml(html));
+    let imgTagCount = 0;
+    if (html) {
+      imgTagCount = new DOMParser().parseFromString(html, 'text/html').querySelectorAll('img').length;
+      found.push(...fromHtml(html));
+    }
 
     const uri = dt.getData('text/uri-list');
     if (uri) found.push(...uri.split(/\s+/).filter(Boolean));
@@ -288,9 +447,14 @@
     if (text) found.push(...fromText(text));
 
     if (!found.length) {
-      say('Nothing image-like in that paste. Try selecting the page (Ctrl/Cmd+A) before copying.', true);
+      const detail = html
+        ? `saw ${imgTagCount} <img> tag(s) in the HTML but none had a usable image URL — this site likely renders images via CSS classes rather than inline styles, which a clipboard paste cannot see`
+        : 'the clipboard had no HTML at all';
+      say(`Nothing image-like in that paste (${detail}). Try dragging an image straight from the browser tab into this window instead.`, true);
+      showDebug(html ? summarizeHtml(html) : '(no HTML on the clipboard)');
       return;
     }
+    hideDebug();
     add(found);
   }
 
@@ -304,30 +468,98 @@
 
   /* ---------------- extraction ---------------- */
 
+  // Attribute names sites commonly stash the *real* image URL in while lazy-loading
+  // (the actual `src` is often left as a 1x1 placeholder until the image scrolls
+  // into view — which never happens for a copy-paste, since nothing is "in view").
+  const LAZY_ATTRS = [
+    'data-src', 'data-srcset', 'data-lazy-src', 'data-lazy', 'data-original',
+    'data-actualsrc', 'data-defer-src', 'data-hi-res-src', 'data-large-src',
+    'data-image', 'data-img', 'data-thumb', 'data-full-src', 'data-zoom-src',
+  ];
+
   function fromHtml(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const out = [];
+    const push = (v) => { if (v) out.push(v); };
 
     doc.querySelectorAll('img').forEach((img) => {
-      const best = bestFromSrcset(img.getAttribute('srcset'));
-      out.push(best || img.getAttribute('src'));
+      push(bestFromSrcset(img.getAttribute('srcset')));
+      push(img.getAttribute('src'));
+      LAZY_ATTRS.forEach((a) => {
+        const v = img.getAttribute(a);
+        if (v) push(bestFromSrcset(v) || v);
+      });
     });
 
     doc.querySelectorAll('source[srcset]').forEach((s) => {
-      out.push(bestFromSrcset(s.getAttribute('srcset')));
+      push(bestFromSrcset(s.getAttribute('srcset')));
     });
 
-    doc.querySelectorAll('[style*="background-image"]').forEach((n) => {
-      const m = /url\(['"]?(.+?)['"]?\)/i.exec(n.getAttribute('style') || '');
-      if (m) out.push(m[1]);
+    // <noscript> fallbacks often hold a plain, non-lazy <img> with the real src.
+    doc.querySelectorAll('noscript').forEach((ns) => {
+      const inner = new DOMParser().parseFromString(ns.textContent || '', 'text/html');
+      inner.querySelectorAll('img').forEach((img) => push(img.getAttribute('src')));
+    });
+
+    // Any inline background-image / background shorthand, not just elements whose
+    // style attribute happens to contain the literal substring "background-image".
+    doc.querySelectorAll('[style*="background"]').forEach((n) => {
+      const style = n.getAttribute('style') || '';
+      const re = /url\(\s*['"]?(.+?)['"]?\s*\)/gi;
+      let m;
+      while ((m = re.exec(style))) push(m[1]);
     });
 
     doc.querySelectorAll('a[href]').forEach((a) => {
       const href = a.getAttribute('href');
-      if (href && IMG_EXT.test(href)) out.push(href);
+      if (href && IMG_EXT.test(href)) push(href);
+    });
+
+    // Generic sweep: sites invent their own lazy-load attribute names constantly.
+    // Catch any attribute whose name hints at an image and whose value looks like
+    // an image URL, regardless of whether we knew that attribute name in advance.
+    doc.querySelectorAll('*').forEach((node) => {
+      for (const attr of node.attributes) {
+        const name = attr.name.toLowerCase();
+        if (name === 'src' || name === 'srcset' || name === 'href' || name === 'style') continue;
+        if (!/(src|image|img|photo|thumb|bg-|background)/i.test(name)) continue;
+        const v = attr.value;
+        if (!v || /\.(css|js|json|svg|woff2?|ttf)(\?|#|$)/i.test(v)) continue;
+        if (v.startsWith('data:image/')) { push(v); continue; }
+        if (IMG_EXT.test(v) || /^https?:\/\//i.test(v)) push(v);
+      }
     });
 
     return out.filter(Boolean);
+  }
+
+  // Diagnostic dump for when extraction finds nothing. Raw HTML from real sites is
+  // megabytes of inline-style noise (Pinterest especially) — a plain text dump just
+  // shows whatever happens to be first (usually header chrome), never the actual
+  // pins. This instead reports counts over the *whole* parsed document and prints
+  // the real attributes on a sample of <img> tags, wherever they are.
+  function summarizeHtml(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const imgs = Array.from(doc.querySelectorAll('img'));
+    const bg = doc.querySelectorAll('[style*="background"]').length;
+    const lines = [];
+    lines.push(`html length: ${html.length} chars`);
+    lines.push(`<img> tags found: ${imgs.length}`);
+    lines.push(`elements with inline background style: ${bg}`);
+    lines.push('');
+    if (!imgs.length) {
+      lines.push('(no <img> tags anywhere in the pasted HTML)');
+    } else {
+      lines.push('sample <img> tags (attributes only, style omitted):');
+      imgs.slice(0, 10).forEach((img, i) => {
+        const attrs = Array.from(img.attributes)
+          .filter((a) => a.name.toLowerCase() !== 'style')
+          .map((a) => `${a.name}="${a.value.slice(0, 300)}"`)
+          .join(' ');
+        lines.push(`[${i}] <img ${attrs}>`);
+      });
+    }
+    return lines.join('\n');
   }
 
   // srcset entries look like "url 2x" or "url 800w" — take the biggest descriptor.
@@ -349,6 +581,17 @@
   }
 
   function fromText(text) {
+    // A clean list of one bare URL per line — what the bookmarklet produces — is
+    // already curated. Trust it outright instead of running it through the
+    // extension/CDN-name heuristic below, which exists only to filter incidental
+    // URLs out of a page's rendered text and would wrongly drop legitimate images
+    // served from CDNs whose paths don't look like image URLs (no extension, no
+    // "cdn"/"images" in the hostname).
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length && lines.every((l) => /^(https?:\/\/|data:image\/)\S+$/i.test(l))) {
+      return lines;
+    }
+
     const urls = text.match(/(https?:\/\/|data:image\/)[^\s"'<>)\]]+/gi) || [];
     return urls.filter((u) => u.startsWith('data:') || IMG_EXT.test(u) || /pinimg|cdn|images?\./i.test(u));
   }
@@ -612,6 +855,27 @@
     status.textContent = msg || '';
     status.classList.toggle('err', !!isError);
   }
+
+  const debugPanel = el('debug');
+  const debugText = el('debug-text');
+  function showDebug(raw) {
+    debugText.value = raw.slice(0, 20000);
+    debugPanel.classList.add('on');
+  }
+  function hideDebug() {
+    debugPanel.classList.remove('on');
+    debugText.value = '';
+  }
+  el('debug-hide').onclick = hideDebug;
+  el('debug-copy').onclick = async () => {
+    debugText.select();
+    try {
+      await navigator.clipboard.writeText(debugText.value);
+      say('Copied — paste it back to me.', false);
+    } catch (e) {
+      say('Could not auto-copy — select the text above and copy manually.', true);
+    }
+  };
 
   onmessage = (e) => {
     const m = e.data.pluginMessage;
